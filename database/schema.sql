@@ -129,8 +129,16 @@ CREATE TABLE IF NOT EXISTS `orders` (
   `total_discount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
   `tax_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
   `grand_total` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
-  `payment_method` ENUM('Cash', 'UPI', 'Credit', 'BankTransfer') NOT NULL DEFAULT 'Cash',
+  `paid_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `pending_balance` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `received_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `return_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `payment_method` VARCHAR(100) NOT NULL DEFAULT 'Cash',
   `payment_status` ENUM('Pending', 'Paid', 'Partial') NOT NULL DEFAULT 'Paid',
+  `split_payments` JSON DEFAULT NULL,
+  `split_returns` JSON DEFAULT NULL,
+  `vehicle_number` VARCHAR(100) DEFAULT NULL,
+  `driver_name` VARCHAR(255) DEFAULT NULL,
   `order_status` ENUM('Confirmed', 'Processing', 'Delivered', 'Cancelled') NOT NULL DEFAULT 'Confirmed',
   `notes` TEXT DEFAULT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -168,3 +176,17 @@ CREATE TABLE IF NOT EXISTS `otp_verifications` (
   `expires_at` DATETIME NOT NULL,
   `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ------------------------------------------------------------------------------
+-- Table 9: SETTINGS (Application System & Policy Settings)
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `settings` (
+  `key` VARCHAR(100) PRIMARY KEY,
+  `value` TEXT NOT NULL,
+  `description` VARCHAR(255) DEFAULT NULL,
+  `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT IGNORE INTO `settings` (`key`, `value`, `description`) VALUES
+('otp_enabled', 'true', 'Require OTP verification for new customer creation in POS');
+

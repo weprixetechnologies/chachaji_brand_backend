@@ -9,5 +9,7 @@ router.use(requireAuth, requireRole('Admin', 'Salesman'));
 router.get('/', orderController.getAllOrders);
 router.get('/:id', orderController.getOrderById);
 router.post('/', orderController.createOrder);
+router.put('/:id/delivery-info', orderController.updateDeliveryInfo);
+router.put('/:id/payment', orderController.updateOrderPayment);
 
 module.exports = router;

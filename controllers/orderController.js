@@ -7,6 +7,26 @@ function generateOrderNumber() {
     return `ORD-${year}-${rand}`;
 }
 
+// Helper to normalize JSON columns in order
+function normalizeOrder(order) {
+    if (!order) return order;
+    if (typeof order.split_payments === 'string') {
+        try {
+            order.split_payments = JSON.parse(order.split_payments);
+        } catch (e) {
+            order.split_payments = [];
+        }
+    }
+    if (typeof order.split_returns === 'string') {
+        try {
+            order.split_returns = JSON.parse(order.split_returns);
+        } catch (e) {
+            order.split_returns = [];
+        }
+    }
+    return order;
+}
+
 /**
  * Create Order with Per-Row Discounts & Inventory Stock Deduction
  * POST /api/orders
@@ -16,7 +36,20 @@ exports.createOrder = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        const { buyer_id, items, payment_method = 'Cash', notes = '' } = req.body;
+        const {
+            buyer_id,
+            items,
+            payment_method = 'Cash',
+            notes = '',
+            vehicle_number = null,
+            driver_name = null,
+            payment_type = 'full',
+            paid_amount,
+            received_amount,
+            return_amount,
+            split_payments,
+            split_returns
+        } = req.body;
         const salesman_id = req.user.id;
 
         if (!buyer_id) {
@@ -148,24 +181,144 @@ exports.createOrder = async (req, res) => {
         const grand_total = subtotal - total_discount + tax_amount;
         const orderNumber = generateOrderNumber();
 
-        // Insert Order Header
-        const [orderResult] = await connection.query(
-            `INSERT INTO orders (
-                order_number, salesman_id, buyer_id, subtotal, total_discount,
-                tax_amount, grand_total, payment_method, payment_status, order_status, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Paid', 'Confirmed', ?)`,
-            [
-                orderNumber,
-                salesman_id,
-                buyer_id,
-                subtotal,
-                total_discount,
-                tax_amount,
-                grand_total,
-                payment_method,
-                notes || null
-            ]
-        );
+        // Clean & process split payments if provided
+        let cleanedSplitPayments = null;
+        let totalSplitReceived = 0;
+        if (Array.isArray(split_payments) && split_payments.length > 0) {
+            cleanedSplitPayments = split_payments
+                .map(sp => ({
+                    method: sp.method || 'Cash',
+                    amount: Math.max(0, parseFloat(sp.amount) || 0),
+                    notes: sp.notes ? String(sp.notes).trim() : undefined
+                }))
+                .filter(sp => sp.amount > 0);
+            
+            totalSplitReceived = cleanedSplitPayments.reduce((acc, curr) => acc + curr.amount, 0);
+        }
+
+        let effectivePaymentMethod = payment_method || 'Cash';
+        if (cleanedSplitPayments && cleanedSplitPayments.length > 0) {
+            effectivePaymentMethod = 'Split';
+        }
+
+        let calculatedReceived = 0;
+        let calculatedPaid = 0;
+        let calculatedPending = 0;
+        let calculatedReturn = 0;
+        let calculatedStatus = 'Paid';
+
+        if (effectivePaymentMethod === 'Credit') {
+            calculatedReceived = 0;
+            calculatedPaid = 0;
+            calculatedPending = grand_total;
+            calculatedReturn = 0;
+            calculatedStatus = 'Pending';
+        } else {
+            if (cleanedSplitPayments && cleanedSplitPayments.length > 0) {
+                calculatedReceived = totalSplitReceived;
+            } else if (received_amount !== undefined && received_amount !== null && !isNaN(parseFloat(received_amount))) {
+                calculatedReceived = Math.max(0, parseFloat(received_amount));
+            } else if (payment_type === 'part' || paid_amount !== undefined) {
+                calculatedReceived = Math.max(0, parseFloat(paid_amount) || 0);
+            } else {
+                calculatedReceived = grand_total;
+            }
+
+            if (calculatedReceived >= grand_total) {
+                calculatedPaid = grand_total;
+                calculatedPending = 0;
+                calculatedReturn = Math.max(0, calculatedReceived - grand_total);
+                calculatedStatus = 'Paid';
+            } else {
+                calculatedPaid = calculatedReceived;
+                calculatedPending = Math.max(0, grand_total - calculatedReceived);
+                calculatedReturn = 0;
+                calculatedStatus = calculatedPaid > 0 ? 'Partial' : 'Pending';
+            }
+        }
+
+        // Clean & process split returns if change is due
+        let cleanedSplitReturns = null;
+        if (calculatedReturn > 0) {
+            if (Array.isArray(split_returns) && split_returns.length > 0) {
+                cleanedSplitReturns = split_returns
+                    .map(sr => ({
+                        method: sr.method || 'Cash',
+                        amount: Math.max(0, parseFloat(sr.amount) || 0)
+                    }))
+                    .filter(sr => sr.amount > 0);
+            }
+            if (!cleanedSplitReturns || cleanedSplitReturns.length === 0) {
+                cleanedSplitReturns = [{ method: 'Cash', amount: calculatedReturn }];
+            }
+        }
+
+        const splitPaymentsJson = cleanedSplitPayments && cleanedSplitPayments.length > 0 ? JSON.stringify(cleanedSplitPayments) : null;
+        const splitReturnsJson = cleanedSplitReturns && cleanedSplitReturns.length > 0 ? JSON.stringify(cleanedSplitReturns) : null;
+
+        const vNum = vehicle_number && vehicle_number.trim() ? vehicle_number.trim() : null;
+        const dName = driver_name && driver_name.trim() ? driver_name.trim() : null;
+
+        // Insert Order Header with fallback for unmigrated columns
+        let orderResult;
+        try {
+            [orderResult] = await connection.query(
+                `INSERT INTO orders (
+                    order_number, salesman_id, buyer_id, subtotal, total_discount,
+                    tax_amount, grand_total, paid_amount, pending_balance,
+                    received_amount, return_amount, payment_method, payment_status,
+                    split_payments, split_returns, vehicle_number, driver_name, order_status, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Confirmed', ?)`,
+                [
+                    orderNumber,
+                    salesman_id,
+                    buyer_id,
+                    subtotal,
+                    total_discount,
+                    tax_amount,
+                    grand_total,
+                    calculatedPaid,
+                    calculatedPending,
+                    calculatedReceived,
+                    calculatedReturn,
+                    effectivePaymentMethod,
+                    calculatedStatus,
+                    splitPaymentsJson,
+                    splitReturnsJson,
+                    vNum,
+                    dName,
+                    notes || null
+                ]
+            );
+        } catch (insertErr) {
+            if (insertErr.code === 'ER_BAD_FIELD_ERROR') {
+                [orderResult] = await connection.query(
+                    `INSERT INTO orders (
+                        order_number, salesman_id, buyer_id, subtotal, total_discount,
+                        tax_amount, grand_total, paid_amount, pending_balance, payment_method, payment_status,
+                        vehicle_number, driver_name, order_status, notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Confirmed', ?)`,
+                    [
+                        orderNumber,
+                        salesman_id,
+                        buyer_id,
+                        subtotal,
+                        total_discount,
+                        tax_amount,
+                        grand_total,
+                        calculatedPaid,
+                        calculatedPending,
+                        effectivePaymentMethod,
+                        calculatedStatus,
+                        vNum,
+                        dName,
+                        notes || null
+                    ]
+                );
+            } else {
+                throw insertErr;
+            }
+        }
 
         const orderId = orderResult.insertId;
 
@@ -211,7 +364,7 @@ exports.createOrder = async (req, res) => {
         return res.status(201).json({
             message: 'Order placed successfully',
             order: {
-                ...orderRows[0],
+                ...normalizeOrder(orderRows[0]),
                 items: itemRows
             }
         });
@@ -268,7 +421,7 @@ exports.getAllOrders = async (req, res) => {
 
         const [orders] = await pool.query(query, params);
 
-        return res.status(200).json({ orders });
+        return res.status(200).json({ orders: orders.map(normalizeOrder) });
     } catch (error) {
         console.error('Get orders error:', error);
         return res.status(500).json({ error: 'Failed to fetch orders.' });
@@ -302,12 +455,224 @@ exports.getOrderById = async (req, res) => {
 
         return res.status(200).json({
             order: {
-                ...orders[0],
+                ...normalizeOrder(orders[0]),
                 items
             }
         });
     } catch (error) {
         console.error('Get order by ID error:', error);
         return res.status(500).json({ error: 'Failed to fetch order details.' });
+    }
+};
+
+/**
+ * Update Order Delivery Info (Vehicle number & driver name)
+ * PUT /api/orders/:id/delivery-info
+ */
+exports.updateDeliveryInfo = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { vehicle_number, driver_name } = req.body;
+
+        const [existing] = await pool.query('SELECT id FROM orders WHERE id = ?', [id]);
+        if (existing.length === 0) {
+            return res.status(404).json({ error: 'Order not found.' });
+        }
+
+        const vNum = vehicle_number !== undefined && vehicle_number !== null ? vehicle_number.trim() : null;
+        const dName = driver_name !== undefined && driver_name !== null ? driver_name.trim() : null;
+
+        await pool.query(
+            'UPDATE orders SET vehicle_number = ?, driver_name = ? WHERE id = ?',
+            [vNum || null, dName || null, id]
+        );
+
+        const [updatedRows] = await pool.query(
+            `SELECT o.*, 
+                    s.name AS salesman_name, s.staff_code AS salesman_code, s.email AS salesman_email,
+                    b.name AS buyer_name, b.phone AS buyer_phone, b.email AS buyer_email, b.company_name AS buyer_company, b.gstin AS buyer_gstin, b.address AS buyer_address, b.city AS buyer_city, b.state AS buyer_state, b.pincode AS buyer_pincode
+             FROM orders o
+             JOIN employees s ON o.salesman_id = s.id
+             JOIN users b ON o.buyer_id = b.id
+             WHERE o.id = ?`,
+            [id]
+        );
+
+        const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ?', [id]);
+
+        return res.status(200).json({
+            message: 'Delivery info updated successfully',
+            order: {
+                ...normalizeOrder(updatedRows[0]),
+                items
+            }
+        });
+    } catch (error) {
+        console.error('Update delivery info error:', error);
+        return res.status(500).json({ error: 'Failed to update delivery info.' });
+    }
+};
+
+/**
+ * Record / Collect Payment for Pending or Partial Order
+ * Supports split payment method, extra received & return change
+ * PUT /api/orders/:id/payment
+ */
+exports.updateOrderPayment = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const {
+            amount_to_add,
+            received_amount,
+            payment_method = 'Cash',
+            split_payments,
+            split_returns
+        } = req.body;
+
+        const [existing] = await pool.query('SELECT * FROM orders WHERE id = ?', [id]);
+        if (existing.length === 0) {
+            return res.status(404).json({ error: 'Order not found.' });
+        }
+
+        const order = existing[0];
+        let addAmount = parseFloat(amount_to_add) || 0;
+        let recAmount = (received_amount !== undefined && received_amount !== null && !isNaN(parseFloat(received_amount)))
+            ? parseFloat(received_amount)
+            : addAmount;
+
+        if (Array.isArray(split_payments) && split_payments.length > 0) {
+            const splitSum = split_payments.reduce((acc, curr) => acc + (parseFloat(curr.amount) || 0), 0);
+            if (splitSum > 0) {
+                recAmount = splitSum;
+                addAmount = splitSum;
+            }
+        }
+
+        if (addAmount <= 0 && recAmount <= 0) {
+            return res.status(400).json({ error: 'Please enter a valid payment amount.' });
+        }
+
+        const currentPaid = parseFloat(order.paid_amount) || 0;
+        const currentReceived = parseFloat(order.received_amount) || currentPaid;
+        const grandTotal = parseFloat(order.grand_total) || 0;
+        const pendingBal = parseFloat(order.pending_balance) || Math.max(0, grandTotal - currentPaid);
+
+        const extraChange = Math.max(0, recAmount - pendingBal);
+        const effectiveAddedToBill = Math.min(pendingBal, recAmount);
+        const newPaid = Math.min(grandTotal, currentPaid + effectiveAddedToBill);
+        const newPending = Math.max(0, grandTotal - newPaid);
+        const newStatus = newPending <= 0 ? 'Paid' : (newPaid > 0 ? 'Partial' : 'Pending');
+        const newReceived = currentReceived + recAmount;
+        const newReturn = (parseFloat(order.return_amount) || 0) + extraChange;
+
+        // Combine existing split payments with new ones
+        let existingSplits = [];
+        if (order.split_payments) {
+            try {
+                existingSplits = typeof order.split_payments === 'string' ? JSON.parse(order.split_payments) : order.split_payments;
+            } catch (e) {
+                existingSplits = [];
+            }
+        }
+        if (!Array.isArray(existingSplits)) existingSplits = [];
+
+        if (Array.isArray(split_payments) && split_payments.length > 0) {
+            split_payments.forEach(sp => {
+                const amt = parseFloat(sp.amount) || 0;
+                if (amt > 0) {
+                    existingSplits.push({
+                        method: sp.method || 'Cash',
+                        amount: amt,
+                        date: new Date().toISOString()
+                    });
+                }
+            });
+        } else {
+            existingSplits.push({
+                method: payment_method || 'Cash',
+                amount: recAmount,
+                date: new Date().toISOString()
+            });
+        }
+
+        let existingReturns = [];
+        if (order.split_returns) {
+            try {
+                existingReturns = typeof order.split_returns === 'string' ? JSON.parse(order.split_returns) : order.split_returns;
+            } catch (e) {
+                existingReturns = [];
+            }
+        }
+        if (!Array.isArray(existingReturns)) existingReturns = [];
+
+        if (extraChange > 0) {
+            if (Array.isArray(split_returns) && split_returns.length > 0) {
+                split_returns.forEach(sr => {
+                    const rAmt = parseFloat(sr.amount) || 0;
+                    if (rAmt > 0) {
+                        existingReturns.push({
+                            method: sr.method || 'Cash',
+                            amount: rAmt,
+                            date: new Date().toISOString()
+                        });
+                    }
+                });
+            } else {
+                existingReturns.push({
+                    method: 'Cash',
+                    amount: extraChange,
+                    date: new Date().toISOString()
+                });
+            }
+        }
+
+        try {
+            await pool.query(
+                `UPDATE orders SET 
+                    paid_amount = ?, pending_balance = ?, payment_status = ?,
+                    received_amount = ?, return_amount = ?, split_payments = ?, split_returns = ?
+                 WHERE id = ?`,
+                [
+                    newPaid,
+                    newPending,
+                    newStatus,
+                    newReceived,
+                    newReturn,
+                    JSON.stringify(existingSplits),
+                    existingReturns.length > 0 ? JSON.stringify(existingReturns) : null,
+                    id
+                ]
+            );
+        } catch (e) {
+            // Graceful fallback if extra columns do not exist
+            await pool.query(
+                'UPDATE orders SET paid_amount = ?, pending_balance = ?, payment_status = ? WHERE id = ?',
+                [newPaid, newPending, newStatus, id]
+            );
+        }
+
+        const [updatedRows] = await pool.query(
+            `SELECT o.*, 
+                    s.name AS salesman_name, s.staff_code AS salesman_code, s.email AS salesman_email,
+                    b.name AS buyer_name, b.phone AS buyer_phone, b.email AS buyer_email, b.company_name AS buyer_company, b.gstin AS buyer_gstin, b.address AS buyer_address, b.city AS buyer_city, b.state AS buyer_state, b.pincode AS buyer_pincode
+             FROM orders o
+             JOIN employees s ON o.salesman_id = s.id
+             JOIN users b ON o.buyer_id = b.id
+             WHERE o.id = ?`,
+            [id]
+        );
+
+        const [items] = await pool.query('SELECT * FROM order_items WHERE order_id = ?', [id]);
+
+        return res.status(200).json({
+            message: 'Payment recorded successfully',
+            order: {
+                ...normalizeOrder(updatedRows[0]),
+                items
+            }
+        });
+    } catch (error) {
+        console.error('Update order payment error:', error);
+        return res.status(500).json({ error: 'Failed to record payment.' });
     }
 };

@@ -14,6 +14,7 @@ const userRouter = require('./routers/userRouter');
 const otpRouter = require('./routers/otpRouter');
 const orderRouter = require('./routers/orderRouter');
 const analyticsRouter = require('./routers/analyticsRouter');
+const settingRouter = require('./routers/settingRouter');
 
 // CORS configuration allowing panel access
 app.use(cors({
@@ -37,6 +38,7 @@ app.use('/api/users', userRouter);
 app.use('/api/otp', otpRouter);
 app.use('/api/orders', orderRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/settings', settingRouter);
 
 // Initialize DB and start server
 async function startServer() {

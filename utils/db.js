@@ -185,8 +185,16 @@ async function initDb() {
                 total_discount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
                 tax_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
                 grand_total DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
-                payment_method ENUM('Cash', 'UPI', 'Credit', 'BankTransfer') NOT NULL DEFAULT 'Cash',
+                paid_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                pending_balance DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                received_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                return_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                payment_method VARCHAR(100) NOT NULL DEFAULT 'Cash',
                 payment_status ENUM('Pending', 'Paid', 'Partial') NOT NULL DEFAULT 'Paid',
+                split_payments JSON DEFAULT NULL,
+                split_returns JSON DEFAULT NULL,
+                vehicle_number VARCHAR(100) DEFAULT NULL,
+                driver_name VARCHAR(255) DEFAULT NULL,
                 order_status ENUM('Confirmed', 'Processing', 'Delivered', 'Cancelled') NOT NULL DEFAULT 'Confirmed',
                 notes TEXT DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -196,6 +204,35 @@ async function initDb() {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         `;
         await pool.query(createOrdersTable);
+
+        // Auto migration: add new columns to orders table if existing table lacks them
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN paid_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00;`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN pending_balance DECIMAL(10, 2) NOT NULL DEFAULT 0.00;`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN received_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00;`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN return_amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00;`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN split_payments JSON DEFAULT NULL;`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN split_returns JSON DEFAULT NULL;`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await pool.query(`ALTER TABLE orders MODIFY COLUMN payment_method VARCHAR(100) NOT NULL DEFAULT 'Cash';`);
+        } catch (e) { /* Column already updated */ }
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN vehicle_number VARCHAR(100) DEFAULT NULL;`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await pool.query(`ALTER TABLE orders ADD COLUMN driver_name VARCHAR(255) DEFAULT NULL;`);
+        } catch (e) { /* Column already exists */ }
 
         // 7. Ensure order_items table exists
         const createOrderItemsTable = `
@@ -228,7 +265,29 @@ async function initDb() {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         `;
         await pool.query(createOtpTable);
-        console.log('[DB] Tables "orders", "order_items", & "otp_verifications" checked/created.');
+
+        // 9. Ensure settings table exists
+        const createSettingsTable = `
+            CREATE TABLE IF NOT EXISTS settings (
+                \`key\` VARCHAR(100) PRIMARY KEY,
+                \`value\` TEXT NOT NULL,
+                \`description\` VARCHAR(255) DEFAULT NULL,
+                \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        `;
+        await pool.query(createSettingsTable);
+
+        // Seed default otp_enabled setting if not present
+        const [settingRows] = await pool.query('SELECT COUNT(*) AS count FROM settings WHERE `key` = "otp_enabled"');
+        if (settingRows[0].count === 0) {
+            await pool.query(
+                'INSERT INTO settings (`key`, `value`, `description`) VALUES (?, ?, ?)',
+                ['otp_enabled', 'true', 'Require OTP verification for new customer creation in POS']
+            );
+            console.log('[DB] Default Setting "otp_enabled" seeded (true).');
+        }
+
+        console.log('[DB] Tables "orders", "order_items", "otp_verifications", & "settings" checked/created.');
 
     } catch (error) {
         console.error('[DB Error] Initialization failed:', error);

@@ -1,4 +1,5 @@
 const pool = require('../utils/db');
+const { isOtpEnabled } = require('./settingController');
 
 /**
  * Generate and Send OTP to mobile number
@@ -13,6 +14,17 @@ exports.sendOtp = async (req, res) => {
         }
 
         const cleanPhone = phone.trim();
+
+        // Check if OTP verification is disabled in system settings
+        const enabled = await isOtpEnabled();
+        if (!enabled) {
+            return res.status(200).json({
+                message: 'OTP verification is currently turned off in system settings.',
+                otp_disabled: true,
+                phone: cleanPhone,
+                otp_code: 'SKIPPED'
+            });
+        }
         // Generate 6-digit OTP (e.g., 123456 or random 6 digits)
         const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
         const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes expiration
@@ -50,6 +62,17 @@ exports.verifyOtp = async (req, res) => {
 
         const cleanPhone = phone.trim();
         const cleanOtp = otp_code.trim();
+
+        // Check if OTP verification is disabled in system settings
+        const enabled = await isOtpEnabled();
+        if (!enabled) {
+            return res.status(200).json({
+                message: 'OTP verification is turned off in settings. Verification skipped.',
+                verified: true,
+                otp_disabled: true,
+                phone: cleanPhone
+            });
+        }
 
         const [rows] = await pool.query(
             'SELECT * FROM otp_verifications WHERE phone = ? AND otp_code = ? AND expires_at > NOW()',
